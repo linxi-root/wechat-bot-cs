@@ -43,7 +43,7 @@ jobs:
       - name: Check if metadata changed
         id: check_metadata_changed
         run: |
-          git show HEAD~1:main.py > main_old.py .2/dev/null || echo "文件不存在或首次提交" > main_old.py
+          git show HEAD~1:main.py > main_old.py 2>/dev/null || echo "" > main_old.py
           python .github/scripts/extract_metadata_compare.py main_old.py main.py
           
           if [ -f "metadata_changed.txt" ]; then
@@ -70,13 +70,13 @@ jobs:
             echo "has_metadata=false" >> $GITHUB_OUTPUT
           fi
       
-      - name: Clone target repository
+      - name: Clone FORK repository (not upstream)
         if: |
           steps.check_metadata_changed.outputs.has_changes == 'true' &&
           steps.check_meta.outputs.has_metadata == 'true'
         uses: actions/checkout@v4
         with:
-          repository: ${{ env.TARGET_REPO }}
+          repository: ${{ steps.fork_info.outputs.fork_repo }}
           path: target-repo
           token: ${{ secrets.PLUGIN_SYNC_TOKEN }}
           fetch-depth: 1
