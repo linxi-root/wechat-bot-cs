@@ -123,6 +123,11 @@ jobs:
           Plugin: ${{ steps.check_meta.outputs.plugin_name }}"
           
           git remote add fork "https://x-access-token:${GH_TOKEN}@github.com/${FORK_REPO}.git"
+
+          git fetch fork main
+
+          git rebase fork/main
+          
           git push fork "HEAD:${BRANCH_NAME}" --force
 
           sleep 5
