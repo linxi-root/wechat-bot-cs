@@ -1,0 +1,13 @@
+data/config.yaml
+data/.weixin-token.json
+data/status.png
+push.sh
+update.sh
+*.bak
+*.backup
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+.DS_Store
+Thumbs.db
