@@ -116,23 +116,12 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           
-          # 把当前修改 stash 起来
-          git stash
-          
-          # 添加 fork remote 并切到 fork 的 main
-          git remote add fork "https://x-access-token:${GH_TOKEN}@github.com/${FORK_REPO}.git"
-          git fetch fork main
-          git checkout fork/main
-          
-          # 把 stash 的修改拿出来
-          git stash pop
-          
-          # 提交并推送
           git add plugins.json
           git commit -m "chore: sync plugin metadata from ${{ github.repository }}
           
           Plugin: ${{ steps.check_meta.outputs.plugin_name }}"
           
+          git remote add fork "https://x-access-token:${GH_TOKEN}@github.com/${FORK_REPO}.git"
           git push fork "HEAD:main" --force
           
           sleep 5
