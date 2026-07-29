@@ -111,30 +111,35 @@ jobs:
         run: |
           cd target-repo
           
-          BRANCH_NAME="main"
           FORK_REPO="${{ steps.fork_info.outputs.fork_repo }}"
           
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           
+          # 保存修改后的 plugins.json
+          cp plugins.json /tmp/plugins_updated.json
+          
+          # 切到 fork 的 main 分支
+          git remote add fork "https://x-access-token:${GH_TOKEN}@github.com/${FORK_REPO}.git"
+          git fetch fork main
+          git checkout fork/main
+          
+          # 用修改后的文件覆盖
+          cp /tmp/plugins_updated.json plugins.json
+          
+          # 提交并推送
           git add plugins.json
           git commit -m "chore: sync plugin metadata from ${{ github.repository }}
           
           Plugin: ${{ steps.check_meta.outputs.plugin_name }}"
           
-          git remote add fork "https://x-access-token:${GH_TOKEN}@github.com/${FORK_REPO}.git"
-
-          git fetch fork main
-
-          git rebase fork/main
+          git push fork "HEAD:main" --force
           
-          git push fork "HEAD:${BRANCH_NAME}" --force
-
           sleep 5
           
           gh pr create \
             --repo "${{ env.TARGET_REPO }}" \
-            --head "${FORK_REPO}:${BRANCH_NAME}" \
+            --head "${FORK_REPO}:main" \
             --base main \
             --title "🤖 Auto-sync: Update plugin metadata from ${{ github.repository }}" \
             --body "## 📝 自动同步插件元数据
@@ -145,7 +150,7 @@ jobs:
           - 插件名称: ${{ steps.check_meta.outputs.plugin_name }}
           - 版本: 已从源码同步
 
-          > 🤖 此PR由GitHub Actions自动创建" \
+          > 🤖 此PR由GitHub Actions自动创建"
       
       - name: No changes in metadata
         if: steps.check_metadata_changed.outputs.has_changes == 'false'
