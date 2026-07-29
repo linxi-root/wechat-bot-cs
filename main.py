@@ -61,7 +61,7 @@ __plugin_meta__ = {
     'name': 'wechat-bot',
     'author': '乄杺',
     'description': '利用微信ClawBot实现管理框架机器人以及查看机器人DAU数据',
-    'version': '1.0.1',
+    'version': '1.0.5',
     'github': 'https://github.com/linxi-root/wechat-bot',
 }
 
