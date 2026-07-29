@@ -70,7 +70,8 @@ jobs:
             echo "has_metadata=false" >> $GITHUB_OUTPUT
           fi
       
-      - name: Clone FORK repository (not upstream)
+      # Clone fork，以 fork 数据为准
+      - name: Clone FORK repository
         if: |
           steps.check_metadata_changed.outputs.has_changes == 'true' &&
           steps.check_meta.outputs.has_metadata == 'true'
@@ -81,13 +82,74 @@ jobs:
           token: ${{ secrets.PLUGIN_SYNC_TOKEN }}
           fetch-depth: 1
       
-      - name: Update plugins.json in target repo
+      # 更新 plugins.json，但不修改 name 字段；未找到插件则报错停止
+      - name: Update plugins.json (skip 'name' field)
         if: |
           steps.check_metadata_changed.outputs.has_changes == 'true' &&
           steps.check_meta.outputs.has_metadata == 'true'
         run: |
           cd target-repo
-          python ../.github/scripts/update_target_json.py ../metadata.json
+          python3 -c "
+          import json, sys
+          from pathlib import Path
+          
+          # 读取元数据
+          with open('../metadata.json', 'r', encoding='utf-8') as f:
+              new_metadata = json.load(f)
+          
+          # 读取 fork 的 plugins.json
+          target_file = 'plugins.json'
+          with open(target_file, 'r', encoding='utf-8') as f:
+              plugins_data = json.load(f)
+          
+          if not isinstance(plugins_data, list):
+              print('❌ plugins.json 不是数组')
+              sys.exit(1)
+          
+          plugin_name = new_metadata.get('name')
+          plugin_github = new_metadata.get('github')
+          
+          if not plugin_name:
+              print('❌ 元数据中缺少 name 字段')
+              sys.exit(1)
+          if not plugin_github:
+              print('❌ 元数据中缺少 github 字段')
+              sys.exit(1)
+          
+          # 更新字段列表（不含 name）
+          UPDATE_KEYS = ['author', 'description', 'version', 'github']
+          
+          matched = False
+          updated = False
+          for plugin in plugins_data:
+              if not isinstance(plugin, dict):
+                  continue
+              if (plugin_github and plugin.get('github') == plugin_github) or \
+                 (plugin_name and plugin.get('name') == plugin_name):
+                  matched = True
+                  for key in UPDATE_KEYS:
+                      if key in new_metadata and new_metadata[key]:
+                          old_value = plugin.get(key)
+                          new_value = new_metadata[key]
+                          if old_value != new_value:
+                              plugin[key] = new_value
+                              print(f'  {key}: {old_value} -> {new_value}')
+                              updated = True
+                  break
+          
+          if not matched:
+              print(f'❌ 未找到匹配的插件: {plugin_name}')
+              print(f'   匹配依据: github={plugin_github} 或 name={plugin_name}')
+              sys.exit(1)
+          
+          if updated:
+              with open(target_file, 'w', encoding='utf-8') as f:
+                  json.dump(plugins_data, f, ensure_ascii=False, indent=2)
+                  f.write('\n')
+              print(f'✅ 已更新 plugins.json（name 字段未修改）')
+          else:
+              print('ℹ️  无字段需要更新')
+          "
       
       - name: Check for changes in target repo
         if: |
@@ -104,7 +166,7 @@ jobs:
             echo "No changes to commit"
           fi
       
-      - name: Push to fork and create PR
+      - name: Commit, push to fork and create PR
         if: |
           steps.check_metadata_changed.outputs.has_changes == 'true' &&
           steps.check_changes.outputs.has_changes == 'true'
@@ -151,6 +213,7 @@ jobs:
           ### 📋 更新内容
           - 插件名称: ${{ steps.check_meta.outputs.plugin_name }}
           - 版本: 已从源码同步
+          - 注意: name 字段不会被修改
 
           > 🤖 此PR由GitHub Actions自动创建"
       
