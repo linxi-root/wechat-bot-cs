@@ -124,6 +124,8 @@ jobs:
           
           git remote add fork "https://x-access-token:${GH_TOKEN}@github.com/${FORK_REPO}.git"
           git push fork "HEAD:${BRANCH_NAME}" --force
+
+          sleep 5
           
           gh pr create \
             --repo "${{ env.TARGET_REPO }}" \
