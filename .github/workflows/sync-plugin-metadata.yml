@@ -116,16 +116,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           
-          # 保存修改后的 plugins.json
-          cp plugins.json /tmp/plugins_updated.json
+          # 把当前修改 stash 起来
+          git stash
           
-          # 切到 fork 的 main 分支
+          # 添加 fork remote 并切到 fork 的 main
           git remote add fork "https://x-access-token:${GH_TOKEN}@github.com/${FORK_REPO}.git"
           git fetch fork main
           git checkout fork/main
           
-          # 用修改后的文件覆盖
-          cp /tmp/plugins_updated.json plugins.json
+          # 把 stash 的修改拿出来
+          git stash pop
           
           # 提交并推送
           git add plugins.json
