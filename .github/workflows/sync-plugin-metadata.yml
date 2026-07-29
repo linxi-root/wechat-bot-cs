@@ -31,7 +31,9 @@ jobs:
       
       - name: Set fork info
         id: fork_info
-        run: echo "fork_repo=${{ github.repository_owner }}/Elaina-plugins" >> $GITHUB_OUTPUT
+        run: |
+          echo "fork_owner=${{ github.repository_owner }}" >> $GITHUB_OUTPUT
+          echo "fork_repo=${{ github.repository_owner }}/Elaina-plugins" >> $GITHUB_OUTPUT
       
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -41,7 +43,7 @@ jobs:
       - name: Check if metadata changed
         id: check_metadata_changed
         run: |
-          git show HEAD~1:main.py > main_old.py 2>/dev/null || echo "文件不存在或首次提交" > main_old.py
+          git show HEAD~1:main.py > main_old.py 2>/dev/null || echo "" > main_old.py
           python .github/scripts/extract_metadata_compare.py main_old.py main.py
           
           if [ -f "metadata_changed.txt" ]; then
@@ -102,7 +104,7 @@ jobs:
             echo "No changes to commit"
           fi
       
-      - name: Push to fork and create PR
+      - name: Push to fork
         if: |
           steps.check_metadata_changed.outputs.has_changes == 'true' &&
           steps.check_changes.outputs.has_changes == 'true'
@@ -111,25 +113,81 @@ jobs:
         run: |
           cd target-repo
           
-          FORK_REPO="${{ steps.fork_info.outputs.fork_repo }}"
-          
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           
+          # 使用专用分支，避免污染 fork 的 main
+          BRANCH_NAME="sync/plugin-metadata"
+          
+          git checkout -b "${BRANCH_NAME}"
           git add plugins.json
           git commit -m "chore: sync plugin metadata from ${{ github.repository }}
-          
+
           Plugin: ${{ steps.check_meta.outputs.plugin_name }}"
           
-          git remote add fork "https://x-access-token:${GH_TOKEN}@github.com/${FORK_REPO}.git"
-          git push fork "HEAD:main" --force
+          git remote add fork "https://x-access-token:${GH_TOKEN}@github.com/${{ steps.fork_info.outputs.fork_repo }}.git"
+          git push fork "${BRANCH_NAME}:${BRANCH_NAME}" --force
           
+          echo "branch_name=${BRANCH_NAME}" >> $GITHUB_OUTPUT
+      
+      - name: Verify remote branch with git ls-remote
+        if: |
+          steps.check_metadata_changed.outputs.has_changes == 'true' &&
+          steps.check_changes.outputs.has_changes == 'true'
+        id: verify_remote
+        env:
+          GH_TOKEN: ${{ secrets.PLUGIN_SYNC_TOKEN }}
+        run: |
+          cd target-repo
+          
+          BRANCH_NAME="sync/plugin-metadata"
+          
+          echo "🔍 校验远端分支是否可见..."
+          git ls-remote --heads "https://x-access-token:${GH_TOKEN}@github.com/${{ steps.fork_info.outputs.fork_repo }}.git" "${BRANCH_NAME}"
+          
+          REMOTE_SHA=$(git ls-remote --heads "https://x-access-token:${GH_TOKEN}@github.com/${{ steps.fork_info.outputs.fork_repo }}.git" "${BRANCH_NAME}" | awk '{print $1}')
+          
+          if [ -z "${REMOTE_SHA}" ]; then
+            echo "❌ 远端分支不可见，等待后重试..."
+            sleep 10
+            REMOTE_SHA=$(git ls-remote --heads "https://x-access-token:${GH_TOKEN}@github.com/${{ steps.fork_info.outputs.fork_repo }}.git" "${BRANCH_NAME}" | awk '{print $1}')
+          fi
+          
+          if [ -z "${REMOTE_SHA}" ]; then
+            echo "❌ 远端分支仍然不可见，放弃创建 PR"
+            echo "remote_visible=false" >> $GITHUB_OUTPUT
+            exit 1
+          fi
+          
+          echo "✅ 远端分支可见，SHA: ${REMOTE_SHA}"
+          echo "remote_visible=true" >> $GITHUB_OUTPUT
+          echo "remote_sha=${REMOTE_SHA}" >> $GITHUB_OUTPUT
+      
+      - name: Create Pull Request
+        if: |
+          steps.check_metadata_changed.outputs.has_changes == 'true' &&
+          steps.check_changes.outputs.has_changes == 'true' &&
+          steps.verify_remote.outputs.remote_visible == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PLUGIN_SYNC_TOKEN }}
+        run: |
+          cd target-repo
+          
+          FORK_OWNER="${{ steps.fork_info.outputs.fork_owner }}"
+          BRANCH_NAME="sync/plugin-metadata"
+          
+          echo "🔍 调试信息："
+          echo "  TARGET_REPO=${{ env.TARGET_REPO }}"
+          echo "  HEAD=${FORK_OWNER}:${BRANCH_NAME}"
+          echo "  BASE=${{ env.TARGET_BRANCH }}"
+          
+          # 等待 GitHub 后端完全同步
           sleep 5
           
           gh pr create \
             --repo "${{ env.TARGET_REPO }}" \
-            --head "${FORK_REPO}:main" \
-            --base main \
+            --head "${FORK_OWNER}:${BRANCH_NAME}" \
+            --base "${{ env.TARGET_BRANCH }}" \
             --title "🤖 Auto-sync: Update plugin metadata from ${{ github.repository }}" \
             --body "## 📝 自动同步插件元数据
 
@@ -150,3 +208,12 @@ jobs:
           steps.check_metadata_changed.outputs.has_changes == 'true' &&
           steps.check_changes.outputs.has_changes == 'false'
         run: echo "ℹ️  plugins.json 已是最新，无需更新"
+      
+      - name: Push succeeded but PR creation skipped
+        if: |
+          steps.check_metadata_changed.outputs.has_changes == 'true' &&
+          steps.check_changes.outputs.has_changes == 'true' &&
+          steps.verify_remote.outputs.remote_visible == 'false'
+        run: |
+          echo "⚠️  代码已推送到 fork，但远端分支校验失败，跳过 PR 创建"
+          echo "你可以手动前往 https://github.com/${{ steps.fork_info.outputs.fork_repo }}/tree/sync/plugin-metadata 创建 PR"
