@@ -111,7 +111,7 @@ jobs:
         run: |
           cd target-repo
           
-          BRANCH_NAME="sync-${{ github.repository_owner }}-${{ github.event.repository.name }}"
+          BRANCH_NAME="main"
           FORK_REPO="${{ steps.fork_info.outputs.fork_repo }}"
           
           git config user.name "github-actions[bot]"
@@ -139,7 +139,6 @@ jobs:
           - 版本: 已从源码同步
 
           > 🤖 此PR由GitHub Actions自动创建" \
-            --label "automated,metadata-sync"
       
       - name: No changes in metadata
         if: steps.check_metadata_changed.outputs.has_changes == 'false'
