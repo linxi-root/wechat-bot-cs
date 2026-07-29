@@ -1,0 +1,152 @@
+name: Sync Plugin Metadata to Plugin Market
+
+on:
+  push:
+    paths:
+      - 'main.py'
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  TARGET_REPO: ElainaCore/Elaina-plugins
+  TARGET_BRANCH: main
+
+jobs:
+  sync-metadata:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    
+    steps:
+      - name: Checkout your plugin repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PLUGIN_SYNC_TOKEN }}
+      
+      - name: Set fork info
+        id: fork_info
+        run: echo "fork_repo=${{ github.repository_owner }}/Elaina-plugins" >> $GITHUB_OUTPUT
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Check if metadata changed
+        id: check_metadata_changed
+        run: |
+          git show HEAD~1:main.py > main_old.py 2>/dev/null || echo "文件不存在或首次提交" > main_old.py
+          python .github/scripts/extract_metadata_compare.py main_old.py main.py
+          
+          if [ -f "metadata_changed.txt" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            cat metadata_changed.txt
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "ℹ️  main.py 中的元数据未发生变化，跳过同步"
+          fi
+      
+      - name: Extract metadata from main.py
+        if: steps.check_metadata_changed.outputs.has_changes == 'true'
+        id: extract_meta
+        run: python .github/scripts/extract_metadata.py
+      
+      - name: Check if metadata exists
+        if: steps.check_metadata_changed.outputs.has_changes == 'true'
+        id: check_meta
+        run: |
+          if [ -f "metadata.json" ]; then
+            echo "has_metadata=true" >> $GITHUB_OUTPUT
+            echo "plugin_name=$(jq -r '.name' metadata.json)" >> $GITHUB_OUTPUT
+          else
+            echo "has_metadata=false" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Clone target repository
+        if: |
+          steps.check_metadata_changed.outputs.has_changes == 'true' &&
+          steps.check_meta.outputs.has_metadata == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.TARGET_REPO }}
+          path: target-repo
+          token: ${{ secrets.PLUGIN_SYNC_TOKEN }}
+          fetch-depth: 1
+      
+      - name: Update plugins.json in target repo
+        if: |
+          steps.check_metadata_changed.outputs.has_changes == 'true' &&
+          steps.check_meta.outputs.has_metadata == 'true'
+        run: |
+          cd target-repo
+          python ../.github/scripts/update_target_json.py ../metadata.json
+      
+      - name: Check for changes in target repo
+        if: |
+          steps.check_metadata_changed.outputs.has_changes == 'true' &&
+          steps.check_meta.outputs.has_metadata == 'true'
+        id: check_changes
+        run: |
+          cd target-repo
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+            git status
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+            echo "No changes to commit"
+          fi
+      
+      - name: Push to fork and create PR
+        if: |
+          steps.check_metadata_changed.outputs.has_changes == 'true' &&
+          steps.check_changes.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PLUGIN_SYNC_TOKEN }}
+        run: |
+          cd target-repo
+          
+          BRANCH_NAME="sync-${{ github.repository_owner }}-${{ github.event.repository.name }}"
+          FORK_REPO="${{ steps.fork_info.outputs.fork_repo }}"
+          
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          git add plugins.json
+          git commit -m "chore: sync plugin metadata from ${{ github.repository }}
+          
+          Plugin: ${{ steps.check_meta.outputs.plugin_name }}"
+          
+          git remote add fork "https://x-access-token:${GH_TOKEN}@github.com/${FORK_REPO}.git"
+          git push fork "HEAD:${BRANCH_NAME}" --force
+          
+          gh pr create \
+            --repo "${{ env.TARGET_REPO }}" \
+            --head "${FORK_REPO}:${BRANCH_NAME}" \
+            --base main \
+            --title "🤖 Auto-sync: Update plugin metadata from ${{ github.repository }}" \
+            --body "## 📝 自动同步插件元数据
+
+          检测到插件仓库 **${{ github.repository }}** 的 \`main.py\` 中的元数据发生了更新。
+
+          ### 📋 更新内容
+          - 插件名称: ${{ steps.check_meta.outputs.plugin_name }}
+          - 版本: 已从源码同步
+
+          > 🤖 此PR由GitHub Actions自动创建" \
+            --label "automated,metadata-sync"
+      
+      - name: No changes in metadata
+        if: steps.check_metadata_changed.outputs.has_changes == 'false'
+        run: echo "ℹ️  main.py 中的元数据未发生变化，无需同步"
+      
+      - name: No changes in plugins.json
+        if: |
+          steps.check_metadata_changed.outputs.has_changes == 'true' &&
+          steps.check_changes.outputs.has_changes == 'false'
+        run: echo "ℹ️  plugins.json 已是最新，无需更新"
