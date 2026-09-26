@@ -97,6 +97,7 @@ class WeixinMessage:
 @dataclass
 class GetUpdatesResp:
     ret: Optional[int] = None
+    errcode: Optional[int] = None
     msgs: Optional[list] = None
     get_updates_buf: Optional[str] = None
     sync_buf: Optional[str] = None
@@ -255,6 +256,11 @@ class WeixinApiClient:
             if not data:
                 return GetUpdatesResp(ret=0, msgs=[],
                                       get_updates_buf=get_updates_buf)
+            ret = data.get('ret', 0)
+            errcode = data.get('errcode')
+            if ret in (-14, 14) or errcode in (-14, 14):
+                return GetUpdatesResp(ret=ret, errcode=errcode, msgs=[],
+                                      get_updates_buf=get_updates_buf)
             buf = data.get('get_updates_buf') or data.get('sync_buf') or ""
             raw_msgs = data.get('msgs', []) or []
             msgs = []
@@ -275,7 +281,7 @@ class WeixinApiClient:
                             parsed.append(MessageItem(**ik))
                     msg.item_list = parsed
                 msgs.append(msg)
-            return GetUpdatesResp(ret=data.get('ret', 0), msgs=msgs,
+            return GetUpdatesResp(ret=ret, errcode=errcode, msgs=msgs,
                                   get_updates_buf=buf)
         except Exception as e:
             log.error(f"[API] get_updates: {e}")
@@ -364,6 +370,7 @@ class WeixinMessageSender:
     async def send_text(self, to_user_id: str, text: str,
                         context_token: Optional[str] = None) -> dict:
         msg = WeixinMessage(
+            from_user_id="",
             to_user_id=to_user_id,
             message_type=MessageType.BOT,
             message_state=MessageState.FINISH,
@@ -423,6 +430,7 @@ class WeixinMessageSender:
                 return {"ok": False, "error": "CDN 未返回 x-encrypted-param"}
 
             msg = WeixinMessage(
+                from_user_id="",
                 to_user_id=to_user_id,
                 message_type=MessageType.BOT,
                 message_state=MessageState.FINISH,
@@ -437,7 +445,7 @@ class WeixinMessageSender:
                             aes_key=aes_key_b64,
                             encrypt_type=1,
                         ),
-                        mid_size=raw_size,
+                        mid_size=enc_size,
                     ),
                 )],
             )
