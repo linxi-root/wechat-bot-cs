@@ -364,6 +364,32 @@ async def _upload_to_hosting(image_bytes: bytes,
     return None
 
 
+async def _reply_qq_image(event, image_bytes: bytes, caption: str = "",
+                          filename: str = "image.png") -> bool:
+    """QQ 端发图：优先走图床 markdown，失败再尝试 reply_image。"""
+    image_url = await _upload_to_hosting(image_bytes, filename, event=event)
+    if image_url:
+        md = f"![img]({image_url})"
+        if caption:
+            md = f"{caption}\n\n{md}"
+        try:
+            await event.reply(md)
+            return True
+        except Exception as e:
+            log.warning(f"[图床] markdown 发送失败: {e}")
+    try:
+        await event.reply_image(image_bytes, caption or filename)
+        return True
+    except Exception as e:
+        log.error(f"[QQ发图] reply_image 失败: {e}")
+        if caption:
+            try:
+                await event.reply(caption)
+            except Exception:
+                pass
+        return False
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # Token
 # ══════════════════════════════════════════════════════════════════════════
@@ -425,8 +451,11 @@ def generate_qr_image(url: str, size: int = 360) -> bytes:
                        box_size=10, border=2)
     qr.add_data(url)
     qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white").resize(
-        (size, size), Image.LANCZOS)
+    img = qr.make_image(fill_color="black", back_color="white")
+    if hasattr(img, 'get_image'):
+        img = img.get_image()
+    img = img.convert('RGB')
+    img = img.resize((size, size), Image.LANCZOS)
     buf = BytesIO()
     img.save(buf, format='PNG')
     return buf.getvalue()
@@ -469,12 +498,14 @@ async def _fetch_qr_code() -> tuple:
                     if not qrcode_str:
                         errors.append(f"{label}: 无 qrcode 字段")
                         continue
-                    qr_link = (qr_data.get("qrcode_img_content")
-                               or f"https://liteapp.weixin.qq.com/q/7GiQu1"
-                                  f"?qrcode={qrcode_str}&bot_type=3")
+                    qr_link = qr_data.get("qrcode_img_content") or ""
+                    if not qr_link:
+                        qr_link = (f"https://liteapp.weixin.qq.com/q/7GiQu1"
+                                   f"?qrcode={qrcode_str}&bot_type=3")
                     ip_fallback.set_working_node(
                         ip_fallback.WECHAT_API_HOST, candidate)
-                    log.info(f"[微信Bot] ✅ 二维码获取成功（{label}）")
+                    log.info(f"[微信Bot] ✅ 二维码获取成功（{label}）: "
+                             f"{qrcode_str[:20]}...")
                     return qrcode_str, qr_link
         except Exception as e:
             errors.append(f"{label}: {type(e).__name__}: {e}")
@@ -485,18 +516,20 @@ async def _fetch_qr_code() -> tuple:
 async def _query_qr_status(qrcode_str: str) -> dict:
     url = f"{WECHAT_BASE_URL}/ilink/bot/get_qrcode_status"
     params = {"qrcode": qrcode_str}
-    timeout = aiohttp.ClientTimeout(total=15, connect=10)
+    timeout = aiohttp.ClientTimeout(total=40, connect=10)
     errors = []
     candidates = ip_fallback.build_candidates(
         ip_fallback.WECHAT_API_HOST,
         ip_fallback.WECHAT_API_FALLBACK_IPS)
+    headers = {"iLink-App-ClientVersion": "1"}
+
     for candidate in candidates:
         label = candidate or "DNS"
         try:
             connector = ip_fallback.make_connector(candidate)
             async with aiohttp.ClientSession(
                     connector=connector, timeout=timeout) as session:
-                async with session.get(url, params=params) as resp:
+                async with session.get(url, params=params, headers=headers) as resp:
                     text = await resp.text()
                     if resp.status != 200:
                         errors.append(f"{label}: HTTP {resp.status}")
@@ -514,23 +547,57 @@ async def _query_qr_status(qrcode_str: str) -> dict:
     for candidate in candidates:
         label = candidate or "DNS"
         try:
-            connector = ip_fallback.make_connector(candidate)
-            async with aiohttp.ClientSession(
-                    connector=connector, timeout=timeout) as session:
-                async with session.get(url, params=params) as resp:
-                    text = await resp.text()
-                    if resp.status != 200:
-                        errors.append(f"retry {label}: HTTP {resp.status}")
-                        continue
-                    data = json.loads(text)
-                    ip_fallback.set_working_node(
-                        ip_fallback.WECHAT_API_HOST, candidate)
-                    return data
+            await _reply_qq_image(event, generate_qr_image(qr_link),
+                                  "📱 请扫描上方二维码", "qrcode.png")
+            await event.reply(
+                f"## 📱 微信扫码登录\n---\n```\n{qr_link}\n```\n---\n"
+                f"> 发送 `微信终止` 取消",
+                msg_type=2, buttons=buttons)
         except Exception as e:
             errors.append(f"retry {label}: {type(e).__name__}: {e}")
             continue
-    
-    raise Exception("所有节点均失败（含重试）: " + " | ".join(errors))
+        status = status_data.get("status", "wait")
+        if status == "wait":
+            print(".", end="", flush=True)
+        elif status == "scaned":
+            log.info("[微信Bot] 👀 已扫码")
+        elif status == "expired":
+            refresh_count += 1
+            if refresh_count > 1:
+                _login_in_progress = False
+                raise Exception("二维码多次过期")
+            try:
+                new_qrcode_str, new_qr_link = await _fetch_qr_code()
+                current_qr = new_qrcode_str
+                _current_qr_code = new_qrcode_str
+                _current_qr_link = new_qr_link
+                _current_qr_image_base64 = generate_qr_base64(new_qr_link)
+                _qr_generated_at = time.time()
+                qr_link = new_qr_link
+                if event:
+                    await _reply_qq_image(event, generate_qr_image(qr_link),
+                                          "📱 已刷新", "qrcode.png")
+                    await event.reply(
+                        f"## 新链接\n```\n{qr_link}\n```\n"
+                        f"> 发送 `微信终止` 取消",
+                        msg_type=2, buttons=buttons)
+            except Exception as e:
+                log.error(f"[微信Bot] 刷新二维码失败: {e}")
+        elif status == "confirmed":
+            log.info("[微信Bot] ✅ 登录成功")
+            token_data = {
+                "token": status_data["bot_token"],
+                "baseUrl": status_data.get("baseurl", WECHAT_BASE_URL),
+                "accountId": status_data.get("ilink_bot_id", ""),
+                "userId": status_data.get("ilink_user_id", ""),
+                "savedAt": datetime.now().isoformat(),
+            }
+            save_token(token_data)
+            _login_in_progress = False
+            return token_data
+        await asyncio.sleep(1)
+    _login_in_progress = False
+    raise Exception("登录超时")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -750,68 +817,73 @@ async def _do_stop_wechat():
 # ══════════════════════════════════════════════════════════════════════════
 
 async def wechat_main_loop(session_data: Dict):
-    global _wechat_running, _wechat_session
-
-    if not _SUBMODULES_OK:
-        log.error(f"[微信Bot] 子模块未加载: {_SUBMODULE_ERR}")
-        _wechat_running = False
-        return
-
-    client = WeixinApiClient(session_data["baseUrl"], session_data["token"])
-    sender = WeixinMessageSender(client)
-    buf = ""
-    log.info("[微信Bot] 消息循环启动")
-    while _wechat_running:
-        try:
-            resp = await client.get_updates(buf, timeout_ms=38_000)
-            if resp.get_updates_buf:
-                buf = resp.get_updates_buf
-            if not resp.msgs:
-                continue
-            for msg in resp.msgs:
-                if msg.message_type != 1 or not msg.from_user_id:
+    global _wechat_running
+    sender = None
+    try:
+        from app.weixin_api import WeixinApiClient, WeixinMessageSender
+        from app.commands import WechatCommand
+        base_url = session_data.get("baseUrl") or WECHAT_BASE_URL
+        client = WeixinApiClient(base_url, session_data["token"])
+        sender = WeixinMessageSender(client)
+        buf = ""
+        log.info("[微信Bot] 消息循环启动")
+        while _wechat_running:
+            try:
+                resp = await client.get_updates(buf, timeout_ms=38_000)
+                if getattr(resp, 'ret', 0) in (-14, 14) or (
+                        getattr(resp, 'errcode', None) in (-14, 14)):
+                    log.error("[微信Bot] Session 过期")
+                    _wechat_running = False
+                    break
+                if resp.get_updates_buf:
+                    buf = resp.get_updates_buf
+                if not resp.msgs:
                     continue
-                text = ""
-                context_token = msg.context_token or ""
-                if msg.item_list:
-                    for item in msg.item_list:
-                        if item.type == 1 and item.text_item and item.text_item.text:
-                            text = item.text_item.text
-                            break
-                if not text:
-                    continue
-                if context_token:
-                    _save_context_token(msg.from_user_id, context_token)
-                log.info(f"[微信消息] 收到: {text[:50]}")
-                handler_, args = WechatCommand.match(text)
-                if handler_:
-                    await handler_(sender, msg.from_user_id, context_token, args)
-                else:
-                    await sender.send_text(
-                        msg.from_user_id,
-                        f"收到消息: {text}\n发送「帮助」查看可用指令",
-                        context_token)
-        except asyncio.CancelledError:
-            break
-        except SessionExpiredError as e:
-            log.error(f"[微信Bot] Session 过期: {e}")
-            _wechat_running = False
-            _wechat_session = None
-            try: clear_token()
-            except Exception: pass
-            break
-        except Exception as e:
-            if "session timeout" in str(e).lower() or "-14" in str(e):
-                log.error(f"[微信Bot] Session 过期: {e}")
-                _wechat_running = False
-                _wechat_session = None
-                try: clear_token()
-                except Exception: pass
+                for msg in resp.msgs:
+                    if msg.message_type != 1 or not msg.from_user_id:
+                        continue
+                    text = ""
+                    context_token = msg.context_token or ""
+                    if msg.item_list:
+                        for item in msg.item_list:
+                            if item.type == 1 and item.text_item and item.text_item.text:
+                                text = item.text_item.text
+                                break
+                    if not text:
+                        continue
+                    if context_token:
+                        _save_context_token(msg.from_user_id, context_token)
+                    log.info(f"[微信消息] 收到: {text[:50]}")
+                    handler_, args = WechatCommand.match(text)
+                    if handler_:
+                        await handler_(sender, msg.from_user_id,
+                                       context_token, args)
+                    else:
+                        await sender.send_text(
+                            msg.from_user_id,
+                            f"收到消息: {text}\n发送「帮助」查看可用指令",
+                            context_token)
+            except asyncio.CancelledError:
                 break
-            log.error(f"[微信Bot] 轮询出错: {e}")
-            await asyncio.sleep(3)
-    await sender.close()
-    log.info("[微信Bot] 消息循环停止")
+            except Exception as e:
+                if "session timeout" in str(e).lower() or "-14" in str(e):
+                    log.error("[微信Bot] Session 过期")
+                    _wechat_running = False
+                    break
+                log.error(f"[微信Bot] 轮询出错: {e}")
+                await asyncio.sleep(3)
+    except asyncio.CancelledError:
+        pass
+    except Exception as e:
+        log.error(f"[微信Bot] 消息循环异常退出: {e}")
+    finally:
+        if sender is not None:
+            try:
+                await sender.close()
+            except Exception:
+                pass
+        _wechat_running = False
+        log.info("[微信Bot] 消息循环停止")
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -979,8 +1051,82 @@ async def api_stop(request):
 @register_route('POST', '/api/ext/wechat/start', auth=False)
 async def api_start(request):
     from aiohttp import web
-    result = await _await_plugin(_api_start_async(), timeout=15)
-    return web.json_response(result)
+    if _wechat_running:
+        return web.json_response({'ok': False, 'message': '已在运行中'})
+    existing = load_token()
+    if existing:
+        success, msg = await start_wechat()
+        return web.json_response({'ok': success, 'message': msg,
+                                  'need_login': False})
+    success, msg, qr_code, qr_url, qr_image = await start_wechat_async()
+    return web.json_response({
+        'ok': success, 'message': msg, 'need_login': True,
+        'qr_code': qr_code, 'qr_url': qr_url, 'qr_image': qr_image,
+    })
+
+
+@register_route('POST', '/api/ext/wechat/send-image', auth=False)
+async def api_send_image(request):
+    from aiohttp import web
+    from app.weixin_api import WeixinApiClient, WeixinMessageSender
+
+    if not _wechat_running or not _wechat_session:
+        return web.json_response({'ok': False, 'message': '微信 Bot 未运行'},
+                                 status=400)
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({'ok': False, 'message': '请求体必须为 JSON'},
+                                 status=400)
+
+    image_b64 = (body.get('image') or '').strip()
+    if not image_b64:
+        return web.json_response({'ok': False, 'message': '缺少 image 字段'},
+                                 status=400)
+    if image_b64.startswith('data:'):
+        try:
+            image_b64 = image_b64.split(',', 1)[1]
+        except Exception:
+            return web.json_response({'ok': False, 'message': 'data URI 格式错误'},
+                                     status=400)
+    try:
+        image_data = base64.b64decode(image_b64)
+    except Exception as e:
+        return web.json_response({'ok': False, 'message': f'base64 解码失败: {e}'},
+                                 status=400)
+    if not image_data:
+        return web.json_response({'ok': False, 'message': '图片数据为空'},
+                                 status=400)
+    if len(image_data) > 10 * 1024 * 1024:
+        return web.json_response({'ok': False, 'message': '图片过大（>10MB）'},
+                                 status=400)
+
+    to_user_id = body.get('to_user_id') or ''
+    context_token = body.get('context_token') or ''
+    if not to_user_id or not context_token:
+        try:
+            with open(WECHAT_TOKEN_FILE, 'r', encoding='utf-8') as f:
+                td = json.load(f)
+            to_user_id = to_user_id or td.get('last_user_id') or td.get('userId') or ''
+            context_token = context_token or td.get('context_token') or ''
+        except Exception:
+            pass
+    if not to_user_id:
+        return web.json_response(
+            {'ok': False, 'message': '无目标用户（请先在微信端发一条消息）'},
+            status=400)
+
+    client = WeixinApiClient(_wechat_session["baseUrl"], _wechat_session["token"])
+    sender = WeixinMessageSender(client)
+    try:
+        result = await sender.send_image(to_user_id, image_data, context_token)
+    finally:
+        await sender.close()
+
+    if result.get('ok'):
+        return web.json_response({'ok': True, 'message': '已发送', 'data': result})
+    return web.json_response(
+        {'ok': False, 'message': result.get('error', '发送失败')}, status=500)
 
 
 # ══════════════════════════════════════════════════════════════════════════
@@ -2010,7 +2156,8 @@ async def cmd_wechat_help(event, match):
 @handler(r'^/?系统状态$', name='系统状态', desc='查看系统资源占用',
          priority=5, block=True, owner_only=True)
 async def cmd_system_status_qq(event, match):
-    from .app.system_status import (collect_system_data,
+    """QQ 端系统状态：图片 → 图床；失败自动降级文本"""
+    from app.system_status import (collect_system_data,
                                     generate_status_image,
                                     generate_status_md)
     data = collect_system_data()

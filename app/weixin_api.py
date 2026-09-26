@@ -94,6 +94,7 @@ class WeixinMessage:
 @dataclass
 class GetUpdatesResp:
     ret: Optional[int] = None
+    errcode: Optional[int] = None
     msgs: Optional[list] = None
     get_updates_buf: Optional[str] = None
     sync_buf: Optional[str] = None
@@ -233,6 +234,36 @@ class WeixinApiClient:
         try:
             data = await self._api_post("ilink/bot/getupdates",
                                         body, timeout_ms + 5_000)
+            if not data:
+                return GetUpdatesResp(ret=0, msgs=[],
+                                      get_updates_buf=get_updates_buf)
+            ret = data.get('ret', 0)
+            errcode = data.get('errcode')
+            if ret in (-14, 14) or errcode in (-14, 14):
+                return GetUpdatesResp(ret=ret, errcode=errcode, msgs=[],
+                                      get_updates_buf=get_updates_buf)
+            buf = data.get('get_updates_buf') or data.get('sync_buf') or ""
+            raw_msgs = data.get('msgs', []) or []
+            msgs = []
+            for m in raw_msgs:
+                if not isinstance(m, dict):
+                    continue
+                kwargs = {k: v for k, v in m.items()
+                          if k in WeixinMessage.__dataclass_fields__}
+                msg = WeixinMessage(**kwargs)
+                if msg.item_list:
+                    parsed = []
+                    for item in msg.item_list:
+                        if isinstance(item, dict):
+                            ik = {k: v for k, v in item.items()
+                                  if k in MessageItem.__dataclass_fields__}
+                            if 'text_item' in item and isinstance(item['text_item'], dict):
+                                ik['text_item'] = TextItem(**item['text_item'])
+                            parsed.append(MessageItem(**ik))
+                    msg.item_list = parsed
+                msgs.append(msg)
+            return GetUpdatesResp(ret=ret, errcode=errcode, msgs=msgs,
+                                  get_updates_buf=buf)
         except Exception as e:
             log.error(f"[API] get_updates 异常: {e}")
             return GetUpdatesResp(ret=0, msgs=[], get_updates_buf=get_updates_buf)
@@ -346,6 +377,7 @@ class WeixinMessageSender:
     async def send_text(self, to_user_id: str, text: str,
                         context_token: Optional[str] = None) -> dict:
         msg = WeixinMessage(
+            from_user_id="",
             to_user_id=to_user_id,
             message_type=MessageType.BOT,
             message_state=MessageState.FINISH,
@@ -400,6 +432,7 @@ class WeixinMessageSender:
                 return {"ok": False, "error": "CDN 未返回 x-encrypted-param"}
 
             msg = WeixinMessage(
+                from_user_id="",
                 to_user_id=to_user_id,
                 message_type=MessageType.BOT,
                 message_state=MessageState.FINISH,
@@ -414,7 +447,7 @@ class WeixinMessageSender:
                             aes_key=aes_key_b64,
                             encrypt_type=1,
                         ),
-                        mid_size=enc_size,   # ★ 密文大小
+                        mid_size=enc_size,
                     ),
                 )],
             )
