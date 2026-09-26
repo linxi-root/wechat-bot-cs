@@ -90,7 +90,6 @@ git clone https://github.com/linxi-root/elainabot-wechat-bot.git
 
 - 查看微信 Bot 运行状态
 - 启动 / 停止 / 重启微信 Bot
-- 修改配置（API 地址、公网地址等）
 - 切换图片/文本输出模式
 - 自动登录开关
 

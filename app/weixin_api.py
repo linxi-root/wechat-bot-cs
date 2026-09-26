@@ -1,6 +1,8 @@
 """微信 iLink API 客户端（文本 + 图片）
 
-IP fallback 逻辑集中在 ip_fallback.py。
+v2 关键改动：
+  · get_updates 检测 ret == -14，抛 SessionExpiredError 让消息循环退出
+  · send_image 的 mid_size 使用密文长度
 """
 
 import asyncio
@@ -21,7 +23,6 @@ from urllib.parse import urlparse
 
 import aiohttp
 
-# ─── 让 ip_fallback 能被 import ───────────────────────────────────
 _PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
@@ -33,28 +34,24 @@ CHANNEL_VERSION = "2.4.6"
 ILINK_APP_ID = "bot"
 ILINK_APP_CLIENT_VERSION = "132102"
 CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
+SESSION_EXPIRED_RET = -14
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# 数据模型
-# ══════════════════════════════════════════════════════════════════════════
+class SessionExpiredError(RuntimeError):
+    """iLink 会话过期，调用方应停止消息循环"""
+    pass
+
 
 class MessageType(IntEnum):
-    NONE = 0
-    USER = 1
-    BOT = 2
+    NONE = 0; USER = 1; BOT = 2
 
 
 class MessageItemType(IntEnum):
-    NONE = 0
-    TEXT = 1
-    IMAGE = 2
+    NONE = 0; TEXT = 1; IMAGE = 2
 
 
 class MessageState(IntEnum):
-    NEW = 0
-    GENERATING = 1
-    FINISH = 2
+    NEW = 0; GENERATING = 1; FINISH = 2
 
 
 @dataclass
@@ -102,10 +99,6 @@ class GetUpdatesResp:
     sync_buf: Optional[str] = None
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# 辅助
-# ══════════════════════════════════════════════════════════════════════════
-
 def _random_wechat_uin() -> str:
     return base64.b64encode(str(random.randint(0, 2**32 - 1)).encode()).decode()
 
@@ -128,22 +121,15 @@ def _aes_encrypt_pkcs7(data: bytes, key: bytes) -> bytes:
     return AES.new(key, AES.MODE_ECB).encrypt(pad(data, 16))
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# 主客户端
-# ══════════════════════════════════════════════════════════════════════════
-
 class WeixinApiClient:
     def __init__(self, base_url: str, token: str, timeout_ms: int = 15_000):
         self.base_url = base_url.rstrip("/") if base_url else ""
         self.token = token
         self.timeout_ms = timeout_ms
         self._host = ip_fallback.WECHAT_API_HOST
-        # 持久 session，避免每次重建 TLS
         self._session: Optional[aiohttp.ClientSession] = None
         self._session_node: Optional[str] = None
         self._session_lock = asyncio.Lock()
-
-    # ─── session 管理 ────────────────────────────────────────────
 
     async def _ensure_session(self, candidate: Optional[str]):
         async with self._session_lock:
@@ -151,18 +137,15 @@ class WeixinApiClient:
                     and not self._session.closed
                     and self._session_node == candidate):
                 return self._session
-
             if self._session is not None and not self._session.closed:
                 try:
                     await self._session.close()
                 except Exception:
                     pass
-
             connector = ip_fallback.make_connector(candidate)
             self._session = aiohttp.ClientSession(
                 connector=connector,
-                timeout=aiohttp.ClientTimeout(total=120, connect=30,
-                                               sock_read=60),
+                timeout=aiohttp.ClientTimeout(total=120, connect=30, sock_read=60),
             )
             self._session_node = candidate
             log.info(f"[API] 创建持久 session（节点={candidate or 'DNS'}）")
@@ -177,8 +160,6 @@ class WeixinApiClient:
                     pass
             self._session = None
             self._session_node = None
-
-    # ─── HTTP ────────────────────────────────────────────────────
 
     def _build_headers(self, body_str: str) -> dict:
         headers = {
@@ -203,15 +184,16 @@ class WeixinApiClient:
 
         candidates = ip_fallback.build_candidates(
             self._host, ip_fallback.WECHAT_API_FALLBACK_IPS)
-
         errors = []
+
         for candidate in candidates:
             label = candidate or "DNS"
             try:
                 session = await self._ensure_session(candidate)
                 req_timeout = aiohttp.ClientTimeout(total=timeout_sec)
                 t0 = time.monotonic()
-                async with session.post(url, data=body_json, headers=headers,
+                async with session.post(url, data=body_json,
+                                        headers=headers,
                                         timeout=req_timeout) as resp:
                     text = await resp.text()
                     elapsed_ms = (time.monotonic() - t0) * 1000
@@ -244,43 +226,49 @@ class WeixinApiClient:
         log.debug(f"[API] {endpoint} 所有节点失败: {' | '.join(errors)}")
         return None
 
-    # ─── 业务 API ────────────────────────────────────────────────
-
     async def get_updates(self, get_updates_buf: str = "",
                           timeout_ms: int = 35_000) -> GetUpdatesResp:
+        """长轮询。★ ret == -14 时抛 SessionExpiredError"""
         body = {"get_updates_buf": get_updates_buf}
         try:
             data = await self._api_post("ilink/bot/getupdates",
                                         body, timeout_ms + 5_000)
-            if not data:
-                return GetUpdatesResp(ret=0, msgs=[],
-                                      get_updates_buf=get_updates_buf)
-            buf = data.get('get_updates_buf') or data.get('sync_buf') or ""
-            raw_msgs = data.get('msgs', []) or []
-            msgs = []
-            for m in raw_msgs:
-                if not isinstance(m, dict):
-                    continue
-                kwargs = {k: v for k, v in m.items()
-                          if k in WeixinMessage.__dataclass_fields__}
-                msg = WeixinMessage(**kwargs)
-                if msg.item_list:
-                    parsed = []
-                    for item in msg.item_list:
-                        if isinstance(item, dict):
-                            ik = {k: v for k, v in item.items()
-                                  if k in MessageItem.__dataclass_fields__}
-                            if 'text_item' in item and isinstance(item['text_item'], dict):
-                                ik['text_item'] = TextItem(**item['text_item'])
-                            parsed.append(MessageItem(**ik))
-                    msg.item_list = parsed
-                msgs.append(msg)
-            return GetUpdatesResp(ret=data.get('ret', 0), msgs=msgs,
-                                  get_updates_buf=buf)
         except Exception as e:
-            log.error(f"[API] get_updates: {e}")
-            return GetUpdatesResp(ret=0, msgs=[],
-                                  get_updates_buf=get_updates_buf)
+            log.error(f"[API] get_updates 异常: {e}")
+            return GetUpdatesResp(ret=0, msgs=[], get_updates_buf=get_updates_buf)
+
+        if not data:
+            return GetUpdatesResp(ret=0, msgs=[], get_updates_buf=get_updates_buf)
+
+        # ★ 会话过期检测
+        ret = data.get('ret')
+        if ret == SESSION_EXPIRED_RET:
+            raise SessionExpiredError(f"iLink 会话已过期（ret={ret}）")
+        errmsg = str(data.get('errmsg', '') or data.get('msg', '') or '').lower()
+        if 'session' in errmsg and ('expire' in errmsg or 'timeout' in errmsg):
+            raise SessionExpiredError(f"iLink 会话已过期: {errmsg}")
+
+        buf = data.get('get_updates_buf') or data.get('sync_buf') or ""
+        raw_msgs = data.get('msgs', []) or []
+        msgs = []
+        for m in raw_msgs:
+            if not isinstance(m, dict):
+                continue
+            kwargs = {k: v for k, v in m.items()
+                      if k in WeixinMessage.__dataclass_fields__}
+            msg = WeixinMessage(**kwargs)
+            if msg.item_list:
+                parsed = []
+                for item in msg.item_list:
+                    if isinstance(item, dict):
+                        ik = {k: v for k, v in item.items()
+                              if k in MessageItem.__dataclass_fields__}
+                        if 'text_item' in item and isinstance(item['text_item'], dict):
+                            ik['text_item'] = TextItem(**item['text_item'])
+                        parsed.append(MessageItem(**ik))
+                msg.item_list = parsed
+            msgs.append(msg)
+        return GetUpdatesResp(ret=ret or 0, msgs=msgs, get_updates_buf=buf)
 
     async def send_message(self, msg: WeixinMessage):
         body = {"msg": _dataclass_to_dict(msg)}
@@ -304,7 +292,6 @@ class WeixinApiClient:
                                      body, self.timeout_ms) or {}
 
     async def upload_to_cdn(self, upload_url: str, encrypted_data: bytes) -> str:
-        """CDN 上传 —— 带 IP fallback（ip_fallback.WECHAT_CDN_FALLBACK_IPS）"""
         parsed = urlparse(upload_url)
         path_and_query = parsed.path
         if parsed.query:
@@ -313,7 +300,6 @@ class WeixinApiClient:
         candidates = ip_fallback.build_candidates(
             ip_fallback.WECHAT_CDN_HOST,
             ip_fallback.WECHAT_CDN_FALLBACK_IPS)
-
         timeout = aiohttp.ClientTimeout(total=120, connect=30)
         errors = []
 
@@ -353,10 +339,6 @@ class WeixinApiClient:
         await self._reset_session()
 
 
-# ══════════════════════════════════════════════════════════════════════════
-# 消息发送器
-# ══════════════════════════════════════════════════════════════════════════
-
 class WeixinMessageSender:
     def __init__(self, client: WeixinApiClient):
         self.client = client
@@ -374,9 +356,7 @@ class WeixinMessageSender:
                                     text_item=TextItem(text=text))],
         )
         try:
-            t0 = time.monotonic()
             await self.client.send_message(msg)
-            log.debug(f"[发送] send_text {(time.monotonic()-t0)*1000:.0f}ms")
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "error": str(e)}
@@ -385,17 +365,15 @@ class WeixinMessageSender:
                          context_token: Optional[str] = None) -> dict:
         if not image_data:
             return {"ok": False, "error": "空图片数据"}
-
         try:
             aes_key_hex = secrets.token_hex(16)
             aes_key_b64 = base64.b64encode(aes_key_hex.encode()).decode()
             filekey = secrets.token_hex(16)
             raw_size = len(image_data)
             raw_md5 = hashlib.md5(image_data).hexdigest()
-
             key_bytes = bytes.fromhex(aes_key_hex)
             encrypted = _aes_encrypt_pkcs7(image_data, key_bytes)
-            enc_size = len(encrypted)
+            enc_size = len(encrypted)   # ★ 密文大小
 
             up = await self.client.get_upload_url(
                 filekey=filekey,
@@ -409,7 +387,6 @@ class WeixinMessageSender:
             )
             upload_full_url = up.get("upload_full_url") or ""
             upload_param = up.get("upload_param") or ""
-
             if upload_full_url:
                 cdn_url = upload_full_url
             elif upload_param:
@@ -437,7 +414,7 @@ class WeixinMessageSender:
                             aes_key=aes_key_b64,
                             encrypt_type=1,
                         ),
-                        mid_size=raw_size,
+                        mid_size=enc_size,   # ★ 密文大小
                     ),
                 )],
             )
