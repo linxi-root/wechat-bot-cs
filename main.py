@@ -398,7 +398,7 @@ async def _reply_qq_image(event, image_bytes: bytes, caption: str = "",
     """QQ 端发图：优先图床 markdown，失败回退 reply_image"""
     image_url = await _upload_to_hosting(image_bytes, filename, event=event)
     if image_url:
-        md = f"![img]({image_url})"
+        md = f"![img #360px #360px]({image_url})"
         if caption:
             md = f"{caption}\n\n{md}"
         try:
