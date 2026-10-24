@@ -115,7 +115,6 @@ def _load_submodules() -> bool:
         WeixinApiClient, WeixinMessageSender = _C, _S
         SessionExpiredError, WechatCommand = _E, _Cmd
         _SUBMODULES_OK = True
-        log.info("[微信Bot] 子模块加载成功（相对导入）")
         return True
     except Exception as e:
         errors.append(f"相对: {e}")
@@ -130,7 +129,6 @@ def _load_submodules() -> bool:
                 SessionExpiredError = getattr(m_api, 'SessionExpiredError', RuntimeError)
                 WechatCommand = m_cmd.WechatCommand
                 _SUBMODULES_OK = True
-                log.info(f"[微信Bot] 子模块加载成功（包名 {pkg}）")
                 return True
     except Exception as e:
         errors.append(f"包名: {e}")
@@ -142,7 +140,6 @@ def _load_submodules() -> bool:
         WeixinApiClient, WeixinMessageSender = _C, _S
         SessionExpiredError, WechatCommand = _E, _Cmd
         _SUBMODULES_OK = True
-        log.info("[微信Bot] 子模块加载成功（sys.path）")
         return True
     except Exception as e:
         errors.append(f"sys.path: {e}")
@@ -167,7 +164,6 @@ def _plugin_thread_runner():
     asyncio.set_event_loop(loop)
     _plugin_loop = loop
     _plugin_loop_ready.set()
-    log.info("[微信Bot] 插件线程已启动，独立 event loop 运行中")
     try:
         loop.run_forever()
     except Exception as e:
@@ -283,7 +279,6 @@ def _check_and_install_deps():
                if p not in installed
                and p.lower() not in {i.lower() for i in installed}]
     if not missing:
-        log.info("[微信Bot] 依赖已安装")
         return
     log.info(f"[微信Bot] 安装: {missing}")
     try:
@@ -319,7 +314,6 @@ def load_config() -> dict:
         try:
             with open(CONFIG_PATH, 'w', encoding='utf-8') as f:
                 yaml.dump(cfg, f, allow_unicode=True, default_flow_style=False)
-            log.info("[微信Bot] 配置文件已规范化（移除废弃/未知字段）")
         except Exception as e:
             log.warning(f"[微信Bot] 配置文件规范化失败: {e}")
     _config = cfg
@@ -541,7 +535,6 @@ async def _close_qr_session():
 
 async def _fetch_qr_code() -> tuple:
     url = f"{WECHAT_BASE_URL}/ilink/bot/get_bot_qrcode?bot_type=3"
-    log.info(f"[微信Bot] → GET {url}")
     req_timeout = aiohttp.ClientTimeout(total=15, connect=10)
     errors = []
     candidates = ip_fallback.build_candidates(
@@ -636,7 +629,7 @@ async def _do_login_background(qr_ev: asyncio.Event,
     global _wechat_session, _wechat_task, _wechat_running
     try:
         if _login_abort:
-            holder.update({"ok": False, "msg": "登录已被用户终止"})
+            holder.update({"ok": False, "msg": "登录已被用户终止", "user_friendly": True})
             qr_ev.set(); done_ev.set()
             return
 
@@ -644,7 +637,7 @@ async def _do_login_background(qr_ev: asyncio.Event,
             qrcode_str, qr_link = await _fetch_qr_code()
         except Exception as e:
             log.error(f"[微信Bot] 获取二维码失败: {e}")
-            holder.update({"ok": False, "msg": f"获取二维码失败: {e}"})
+            holder.update({"ok": False, "msg": f"获取二维码失败: {e}", "user_friendly": True})
             qr_ev.set(); done_ev.set()
             return
 
@@ -662,14 +655,14 @@ async def _do_login_background(qr_ev: asyncio.Event,
 
         while time.time() < deadline:
             if _login_abort:
-                holder.update({"ok": False, "msg": "登录已被用户终止"})
+                holder.update({"ok": False, "msg": "登录已被用户终止", "user_friendly": True})
                 done_ev.set()
                 return
             try:
                 status_data = await _query_qr_status(current_qr)
             except Exception as e:
                 if _login_abort:
-                    holder.update({"ok": False, "msg": "登录已被用户终止"})
+                    holder.update({"ok": False, "msg": "登录已被用户终止", "user_friendly": True})
                     done_ev.set()
                     return
                 log.warning(f"[微信Bot] 查询二维码状态失败（将重试）: {e}")
@@ -688,7 +681,7 @@ async def _do_login_background(qr_ev: asyncio.Event,
             if status == "expired":
                 refresh_count += 1
                 if refresh_count > 1:
-                    holder.update({"ok": False, "msg": "二维码多次过期"})
+                    holder.update({"ok": False, "msg": "二维码多次过期", "user_friendly": True})
                     done_ev.set()
                     return
                 try:
@@ -727,11 +720,11 @@ async def _do_login_background(qr_ev: asyncio.Event,
 
             await asyncio.sleep(3)
 
-        holder.update({"ok": False, "msg": "登录超时"})
+        holder.update({"ok": False, "msg": "登录超时", "user_friendly": True})
         done_ev.set()
     except Exception as e:
-        log.exception("[微信Bot] 登录后台任务异常")
-        holder.update({"ok": False, "msg": f"内部错误: {e}"})
+        log.exception(f"[微信Bot] 登录后台任务异常，内部错误{e}")
+        holder.update({"ok": False, "msg": f"内部错误: {e}", "user_friendly": False})
         try:
             qr_ev.set(); done_ev.set()
         except Exception:
@@ -900,7 +893,7 @@ async def _do_stop_wechat():
         try: _login_done_event.set()
         except Exception: pass
     if _current_login_holder is not None:
-        _current_login_holder.update({"ok": False, "msg": "已终止"})
+        _current_login_holder.update({"ok": False, "msg": "已终止", "user_friendly": True})
 
     try:
         await _close_qr_session()
@@ -947,7 +940,7 @@ async def wechat_main_loop(session_data: Dict):
                     continue
                 if context_token:
                     _save_context_token(msg.from_user_id, context_token)
-                log.info(f"[微信消息] 收到: {text[:50]}")
+                #log.info(f"[微信消息] 收到: {text[:50]}")
                 handler_, args = WechatCommand.match(text)
                 if handler_:
                     await handler_(sender, msg.from_user_id, context_token, args)
@@ -1003,6 +996,15 @@ async def _api_get_state_async() -> dict:
         bot_status = 'stopped'
     else:
         bot_status = 'no_token'
+    # ★ 新增：最近一次登录失败原因
+    last_error = ""
+    last_error_friendly = True
+    holder = _current_login_holder
+    if (holder is not None
+            and holder.get("ok") is False
+            and not _login_in_progress):
+        last_error = holder.get("msg", "")
+        last_error_friendly = holder.get("user_friendly", True)
     return {
         'config': cfg,
         'wechat_base_url': WECHAT_BASE_URL,
@@ -1016,8 +1018,9 @@ async def _api_get_state_async() -> dict:
         'qr_image': _current_qr_image_base64,
         'qr_generated_at': _qr_generated_at,
         'login_source': _login_source,
+        'last_error': last_error,                    # ★ 新增
+        'last_error_friendly': last_error_friendly,  # ★ 新增
     }
-
 
 async def _api_start_async():
     global _wechat_session, _wechat_task, _wechat_running
@@ -1066,7 +1069,7 @@ async def _api_abort_login_async():
         try: _login_done_event.set()
         except Exception: pass
     if _current_login_holder is not None:
-        _current_login_holder.update({"ok": False, "msg": "已终止"})
+        _current_login_holder.update({"ok": False, "msg": "已终止", "user_friendly": True})
     return {'ok': True, 'message': '已终止'}
 
 
@@ -1123,7 +1126,6 @@ async def api_save_config(request):
             ip_fallback.set_use_fallback(updates['use_ip_fallback'])
             log.info(f"[微信Bot] IP fallback: "
                      f"{'开' if updates['use_ip_fallback'] else '关'}")
-        log.info(f"[微信Bot] 配置已更新: {updates}")
         return web.json_response({'ok': True, 'message': '已保存', 'data': updates})
     except Exception as e:
         return web.json_response({'ok': False, 'message': str(e)}, status=400)
@@ -1308,6 +1310,8 @@ body::after{width:480px;height:480px;background:var(--bg-glow-2);top:30%;right:-
 .qr-wrap .spinner{width:40px;height:40px;border:3px solid rgba(124,93,255,.12);border-top-color:var(--accent-1);
   border-radius:50%;animation:spin .8s linear infinite;}
 .login-status{text-align:center;font-size:13px;color:var(--text-dim);margin-bottom:14px;font-weight:500;}
+.login-error{display:none;margin-top:14px;padding:12px 16px;background:#fef2f2;border:1px solid rgba(239,68,68,.3);border-radius:var(--radius-sm);color:#b91c1c;font-size:13px;line-height:1.6;animation:slideDown .3s cubic-bezier(.4,0,.2,1);}
+.login-error.show{display:block}
 .link-box{display:flex;align-items:center;gap:10px;background:#fff;border:1px solid var(--border);border-radius:var(--radius-xs);
   padding:10px 14px;margin-bottom:14px;font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text-dim);}
 .link-box > span:first-child{opacity:.5;flex-shrink:0}
@@ -1392,17 +1396,19 @@ body::after{width:480px;height:480px;background:var(--bg-glow-2);top:30%;right:-
       <div class="k">登录时间</div><div class="v" id="sessTime">-</div>
     </div>
 
-    <div class="login-area" id="loginArea">
-      <div class="qr-wrap" id="qrWrapper"><div class="spinner"></div></div>
-      <div class="login-status" id="loginStatusText">正在生成二维码…</div>
-      <div class="link-box">
-        <span>🔗</span>
-        <span class="text" id="linkBox"></span>
+      <div class="login-area" id="loginArea">
+        <div class="qr-wrap" id="qrWrapper"><div class="spinner"></div></div>
+        <div class="login-status" id="loginStatusText">正在生成二维码…</div>
+        <div class="link-box">
+          <span>🔗</span>
+          <span class="text" id="linkBox"></span>
+        </div>
+        <div class="btn-group" style="justify-content:center">
+          <button class="btn btn-ghost btn-sm" onclick="copyLink()">📋 复制链接</button>
+          <button class="btn btn-danger btn-sm" onclick="abortLogin()">🛑 终止登录</button>
+        </div>
       </div>
-      <div class="btn-group" style="justify-content:center">
-        <button class="btn btn-ghost btn-sm" onclick="copyLink()">📋 复制链接</button>
-        <button class="btn btn-danger btn-sm" onclick="abortLogin()">🛑 终止登录</button>
-      </div>
+      <div class="login-error" id="loginError"></div>   <!-- ★ 新增 -->
     </div>
   </div>
 
@@ -1605,7 +1611,21 @@ function render(d){
       stopPoll();
     }
   }
+
+  // ★ 新增：显示最近一次登录失败原因
+  var errBox = $('loginError');
+  if (d.last_error && bs !== 'logging_in') {
+    if (d.last_error_friendly) {
+      errBox.textContent = '⚠️ ' + d.last_error;
+    } else {
+      errBox.textContent = '⚠️ 登录失败，请查看日志或发送「微信登录」重试';
+    }
+    errBox.classList.add('show');
+  } else {
+    errBox.classList.remove('show');
+  }
 }
+
 
 function poll(){
   fetch(API.state).then(function(r){return r.json()}).then(function(r){
@@ -1622,6 +1642,7 @@ function startW(){
   var la = $('loginArea'); la.classList.add('show');
   $('qrWrapper').innerHTML = '<div class="spinner"></div>';
   $('loginStatusText').textContent = '正在生成二维码…';
+  $('loginError').classList.remove('show');
 
   fetch(API.start, {method:'POST'}).then(function(r){return r.json()}).then(function(r){
     if (r.ok){
@@ -1669,6 +1690,7 @@ function confirmRestart(){
   var la = $('loginArea'); la.classList.add('show');
   $('qrWrapper').innerHTML = '<div class="spinner"></div>';
   $('loginStatusText').textContent = '正在生成二维码…';
+  $('loginError').classList.remove('show');
 
   fetch(API.restart, {method:'POST'}).then(function(r){return r.json()}).then(function(r){
     if (r.ok){
@@ -2091,13 +2113,14 @@ async def cmd_wechat_help(event, match):
                 {'text': '状态', 'data': '微信状态', 'enter': True}]]
     await event.reply(
         "## 🤖 微信 Bot 帮助\n---\n**QQ命令**\n"
-        "<qqbot-cmd-input text='微信登录' /><qqbot-cmd-input text='微信终止' />"
-        "<qqbot-cmd-input text='微信登出' /><qqbot-cmd-input text='微信重启' />"
-        "<qqbot-cmd-input text='微信状态' /><qqbot-cmd-input text='微信帮助' />"
+        "<qqbot-cmd-input text='微信登录' />     <qqbot-cmd-input text='微信终止' />\n"
+        "<qqbot-cmd-input text='微信登出' />     <qqbot-cmd-input text='微信重启' />\n"
+        "<qqbot-cmd-input text='微信状态' />     <qqbot-cmd-input text='微信帮助' />\n"
         "<qqbot-cmd-input text='系统状态' />\n\n"
         "**微信端**\n"
-        "`系统状态` / `图片 <url>` / `帮助` / `机器人列表` / "
-        "`启动` / `关闭` / `dau` / `重启`\n\n"
+        "`帮助`           `机器人列表`\n"
+        "`启动`           `关闭` \n `dau`            `重启`\n"
+        "`系统状态`\n"
         "**Web面板**\n侧边栏「微信Bot 配置」",
         msg_type=2, buttons=buttons,
     )
