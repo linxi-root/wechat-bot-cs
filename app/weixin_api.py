@@ -1,8 +1,5 @@
-"""微信 iLink API 客户端（文本 + 图片）
-
-v2 关键改动：
-  · get_updates 检测 ret == -14，抛 SessionExpiredError 让消息循环退出
-  · send_image 的 mid_size 使用密文长度
+"""
+微信 iLink API 客户端（文本 + 图片）
 """
 
 import asyncio
@@ -35,6 +32,7 @@ ILINK_APP_ID = "bot"
 ILINK_APP_CLIENT_VERSION = "132102"
 CDN_BASE_URL = "https://novac2c.cdn.weixin.qq.com/c2c"
 SESSION_EXPIRED_RET = -14
+_EXPIRED_CODES = (SESSION_EXPIRED_RET, -SESSION_EXPIRED_RET)  # (-14, 14)
 
 
 class SessionExpiredError(RuntimeError):
@@ -229,41 +227,14 @@ class WeixinApiClient:
 
     async def get_updates(self, get_updates_buf: str = "",
                           timeout_ms: int = 35_000) -> GetUpdatesResp:
-        """长轮询。★ ret == -14 时抛 SessionExpiredError"""
+        """长轮询。ret/errcode == ±14 或 errmsg 含 session expire/timeout 时
+        抛 SessionExpiredError。"""
         body = {"get_updates_buf": get_updates_buf}
+
+        # 只把「网络/解析调用」包进 try，异常时降级为空响应
         try:
             data = await self._api_post("ilink/bot/getupdates",
                                         body, timeout_ms + 5_000)
-            if not data:
-                return GetUpdatesResp(ret=0, msgs=[],
-                                      get_updates_buf=get_updates_buf)
-            ret = data.get('ret', 0)
-            errcode = data.get('errcode')
-            if ret in (-14, 14) or errcode in (-14, 14):
-                return GetUpdatesResp(ret=ret, errcode=errcode, msgs=[],
-                                      get_updates_buf=get_updates_buf)
-            buf = data.get('get_updates_buf') or data.get('sync_buf') or ""
-            raw_msgs = data.get('msgs', []) or []
-            msgs = []
-            for m in raw_msgs:
-                if not isinstance(m, dict):
-                    continue
-                kwargs = {k: v for k, v in m.items()
-                          if k in WeixinMessage.__dataclass_fields__}
-                msg = WeixinMessage(**kwargs)
-                if msg.item_list:
-                    parsed = []
-                    for item in msg.item_list:
-                        if isinstance(item, dict):
-                            ik = {k: v for k, v in item.items()
-                                  if k in MessageItem.__dataclass_fields__}
-                            if 'text_item' in item and isinstance(item['text_item'], dict):
-                                ik['text_item'] = TextItem(**item['text_item'])
-                            parsed.append(MessageItem(**ik))
-                    msg.item_list = parsed
-                msgs.append(msg)
-            return GetUpdatesResp(ret=ret, errcode=errcode, msgs=msgs,
-                                  get_updates_buf=buf)
         except Exception as e:
             log.error(f"[API] get_updates 异常: {e}")
             return GetUpdatesResp(ret=0, msgs=[], get_updates_buf=get_updates_buf)
@@ -271,11 +242,14 @@ class WeixinApiClient:
         if not data:
             return GetUpdatesResp(ret=0, msgs=[], get_updates_buf=get_updates_buf)
 
-        # ★ 会话过期检测
         ret = data.get('ret')
-        if ret == SESSION_EXPIRED_RET:
-            raise SessionExpiredError(f"iLink 会话已过期（ret={ret}）")
+        errcode = data.get('errcode')
         errmsg = str(data.get('errmsg', '') or data.get('msg', '') or '').lower()
+
+        # ★ 会话过期检测（真正会抛）
+        if ret in _EXPIRED_CODES or errcode in _EXPIRED_CODES:
+            raise SessionExpiredError(
+                f"iLink 会话已过期（ret={ret}, errcode={errcode}）")
         if 'session' in errmsg and ('expire' in errmsg or 'timeout' in errmsg):
             raise SessionExpiredError(f"iLink 会话已过期: {errmsg}")
 
@@ -299,7 +273,11 @@ class WeixinApiClient:
                         parsed.append(MessageItem(**ik))
                 msg.item_list = parsed
             msgs.append(msg)
-        return GetUpdatesResp(ret=ret or 0, msgs=msgs, get_updates_buf=buf)
+
+        return GetUpdatesResp(ret=ret if ret is not None else 0,
+                              errcode=errcode,
+                              msgs=msgs,
+                              get_updates_buf=buf)
 
     async def send_message(self, msg: WeixinMessage):
         body = {"msg": _dataclass_to_dict(msg)}
@@ -377,7 +355,6 @@ class WeixinMessageSender:
     async def send_text(self, to_user_id: str, text: str,
                         context_token: Optional[str] = None) -> dict:
         msg = WeixinMessage(
-            from_user_id="",
             to_user_id=to_user_id,
             message_type=MessageType.BOT,
             message_state=MessageState.FINISH,
@@ -432,7 +409,6 @@ class WeixinMessageSender:
                 return {"ok": False, "error": "CDN 未返回 x-encrypted-param"}
 
             msg = WeixinMessage(
-                from_user_id="",
                 to_user_id=to_user_id,
                 message_type=MessageType.BOT,
                 message_state=MessageState.FINISH,
@@ -447,7 +423,7 @@ class WeixinMessageSender:
                             aes_key=aes_key_b64,
                             encrypt_type=1,
                         ),
-                        mid_size=enc_size,
+                        mid_size=enc_size,   # ★ 密文大小
                     ),
                 )],
             )
