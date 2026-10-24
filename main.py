@@ -1818,20 +1818,18 @@ async def init():
         log.info("[微信Bot] 插件线程已就绪")
 
     _wechat_initialized = True
-    log.info(f"[微信Bot] 已加载。微信 API: {WECHAT_BASE_URL}")
     try:
         enabled = ip_fallback.get_use_fallback()
     except Exception:
         enabled = False
     log.info(f"[微信Bot] IP fallback: {'开' if enabled else '关（默认 DNS）'}")
-    log.info(f"[微信Bot] fallback IP: {ip_fallback.WECHAT_API_FALLBACK_IPS}")
 
     auto_login = _config.get('auto_login', False)
     if auto_login:
         log.info("[微信Bot] 自动启动...")
         try:
             result = await _await_plugin(_api_start_async(), timeout=20)
-            log.info(f"[微信Bot] 自动启动: {result}")
+            log.info(f"[微信Bot] 自动启动: {result['message']}")
         except Exception as e:
             log.error(f"[微信Bot] 自动启动失败: {e}")
     else:
