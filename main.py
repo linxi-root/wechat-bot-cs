@@ -1439,8 +1439,8 @@ body::after{width:480px;height:480px;background:var(--bg-glow-2);top:30%;right:-
 
     <div class="toggle-row">
       <div class="toggle-info">
-        <div class="title">启动时自动登录</div>
-        <div class="desc">插件加载后自动启动微信 Bot</div>
+        <div class="title">启动时自动启动</div>
+        <div class="desc">插件加载后，有登录信息时自动启动微信 Bot；无登录信息不会触发扫码</div>
       </div>
       <label class="switch" id="swAutoLogin"><input type="checkbox" id="autoLogin"><span class="track"></span></label>
     </div>
@@ -1826,12 +1826,16 @@ async def init():
 
     auto_login = _config.get('auto_login', False)
     if auto_login:
-        log.info("[微信Bot] 自动启动...")
-        try:
-            result = await _await_plugin(_api_start_async(), timeout=20)
-            log.info(f"[微信Bot] 自动启动: {result['message']}")
-        except Exception as e:
-            log.error(f"[微信Bot] 自动启动失败: {e}")
+        token = load_token()
+        if not token:
+            log.info("[微信Bot] 未检测到登录信息，跳过自动启动；请手动扫码登录")
+        else:
+            log.info("[微信Bot] 检测到登录信息，自动启动...")
+            try:
+                result = await _await_plugin(_api_start_async(), timeout=20)
+                log.info(f"[微信Bot] 自动启动: {result['message']}")
+            except Exception as e:
+                log.error(f"[微信Bot] 自动启动失败: {e}")
     else:
         log.info("[微信Bot] 已加载（静默模式）")
 

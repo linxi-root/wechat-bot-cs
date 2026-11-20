@@ -95,7 +95,7 @@ git clone https://github.com/linxi-root/elainabot-wechat-bot.git
 - 扫码登录：显示二维码、复制链接、终止登录
 - 切换图片/文本输出模式
 - 使用自定义背景图
-- 启动时自动登录开关
+- 启动时自动启动开关（仅在已有登录信息时生效）
 - IP Fallback 开关（DNS 故障时手动启用备用 IP）
 
 ## ⚙️ 配置文件
@@ -105,7 +105,7 @@ data/config.yaml：
 ```yaml
 use_image: true           # 图片输出模式
 use_background: false     # 自定义背景图（需 data/background.png）
-auto_login: false         # 启动时自动登录
+auto_login: false         # 启动时自动启动（仅在已有登录信息时生效，无登录信息不会触发扫码）
 use_ip_fallback: false    # IP Fallback 开关（默认关闭，仅 DNS 故障时开启）
 ```
 
